@@ -204,10 +204,24 @@ class Player(Tk.Frame):
 
         # panel to hold buttons
         self.buttons_panel = Tk.Toplevel(self.parent)
+        # self.buttons_panel2 = Tk.Toplevel(self.parent)
         self.buttons_panel.title("")
-        self.is_buttons_panel_anchor_active = False
+        # self.is_buttons_panel_anchor_active = False
 
-        buttons = ttk.Frame(self.buttons_panel)
+        # create all of the main containers
+        self.frame_header1 = Tk.Frame(self.buttons_panel, padx=15, pady=5, bg='#f88')
+        self.frame_header2 = Tk.Frame(self.buttons_panel, padx=15, pady=5, bg='#8f8')
+        self.frame_center = Tk.Frame(self.buttons_panel)
+        self.frame_bottom = Tk.Frame(self.buttons_panel, padx=15, pady=15, bg='#88f')
+
+        # # layout all of the main containers
+        # self.buttons_panel.grid_rowconfigure(2, weight=1)
+        # self.buttons_panel.grid_columnconfigure(0, weight=1)
+
+        self.frame_header1.grid(row=0, sticky="ew")
+        self.frame_header2.grid(row=1, sticky="ew")
+
+        buttons = ttk.Frame(self.frame_header1)
         self.playButton = ttk.Button(buttons, text="Play", command=self.OnPlay)
         stop            = ttk.Button(buttons, text="Stop", command=self.OnStop)
         self.muteButton = ttk.Button(buttons, text="Mute", command=self.OnMute)
@@ -221,19 +235,21 @@ class Player(Tk.Frame):
                                   from_=0, to=100, orient=Tk.HORIZONTAL, length=200,
                                   showvalue=0, label='Volume')
         self.volSlider.pack(side=Tk.RIGHT)
-        buttons.pack(side=Tk.BOTTOM, fill=Tk.X)
+        # buttons.pack(side=Tk.TOP, fill=Tk.X)
+        buttons.grid(row=0, column=0)
 
 
         # panel to hold player time slider
-        timers = ttk.Frame(self.buttons_panel)
+        timers = ttk.Frame(self.frame_header2)
         self.timeVar = Tk.DoubleVar()
         self.timeSliderLast = 0
         self.timeSlider = Tk.Scale(timers, variable=self.timeVar, command=self.OnTime,
-                                   from_=0, to=1000, orient=Tk.HORIZONTAL, length=500,
-                                   showvalue=0)  # label='Time',
+                                   from_=0, to=1000, orient=Tk.HORIZONTAL, length=100,
+                                   resolution=0.02, showvalue=0)  # label='Time',
         self.timeSlider.pack(side=Tk.BOTTOM, fill=Tk.X, expand=1)
         self.timeSliderUpdate = time.time()
-        timers.pack(side=Tk.BOTTOM, fill=Tk.X)
+        timers.grid(row=0, column=0)
+        timers.pack(side=Tk.TOP, fill=Tk.X)
 
 
         # VLC player
@@ -252,9 +268,11 @@ class Player(Tk.Frame):
         # Estetic, to keep our video panel at least as wide as our buttons panel.
         self.parent.minsize(width=502, height=0)
 
+        # Windows positions
         width  = int(self.parent.winfo_screenwidth()/2)
         height = int(self.parent.winfo_screenheight())
-        self.parent.geometry(f'{width}x{height}+{width}+0')
+        self.parent.geometry(f'{width}x{height}+0+0')
+        self.buttons_panel.geometry(f'{width}x{height-54}+{width}+0')
 
         if _isMacOS:
             # Only tested on MacOS so far. Enable for other OS after verified tests.
@@ -413,6 +431,7 @@ class Player(Tk.Frame):
                 self.volSlider.set(vol)
 
     def OnResize(self, *unused):
+        return
         """Adjust the window/frame to the video aspect ratio.
         """
         g = self.parent.geometry()
@@ -468,12 +487,7 @@ class Player(Tk.Frame):
                     self.timeSlider.set(t)
                     self.timeSliderLast = int(self.timeVar.get())
         # start the 1 second timer again
-        self.parent.after(1000, self.OnTick)
-        # adjust window to video aspect ratio, done periodically
-        # on purpose since the player.video_get_size() only
-        # returns non-zero sizes after playing for a while
-        if not self._geometry:
-            self.OnResize()
+        self.parent.after(50, self.OnTick)
 
     def OnTime(self, *unused):
         if self.player:
