@@ -1,53 +1,31 @@
-#! /usr/bin/python
-# -*- coding: utf-8 -*-
-
-# tkinter example for VLC Python bindings
-# Copyright (C) 2015 the VideoLAN team
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
-#
-"""A simple example for VLC python bindings using tkinter.
-Requires Python 3.4 or later.
-Author: Patrick Fay
-Date: 23-09-2015
-"""
-
-# Tested with Python 3.7.4, tkinter/Tk 8.6.9 on macOS 10.13.6 only.
-__version__ = '20.05.04'  # mrJean1 at Gmail
-
-# import external libraries
 import vlc
-# import standard libraries
 import sys
-if sys.version_info[0] < 3:
-    import Tkinter as Tk
-    from Tkinter import ttk
-    from Tkinter.filedialog import askopenfilename
-    from Tkinter.tkMessageBox import showerror
-else:
-    import tkinter as Tk
-    from tkinter import ttk
-    from tkinter.filedialog import askopenfilename
-    from tkinter.messagebox import showerror
+
+
+import ffmpeg
+from PIL import Image
+
+import tkinter as Tk
+from tkinter import ttk
+from tkinter.filedialog import askopenfilename
+from tkinter.messagebox import showerror
 from os.path import basename, expanduser, isfile, join as joined
 from pathlib import Path
 import time
 
+import os
+import queue
+import threading
+from datetime import datetime
+
 _isMacOS   = sys.platform.startswith('darwin')
 _isWindows = sys.platform.startswith('win')
 _isLinux   = sys.platform.startswith('linux')
+
+
+def datetime_to_seconds(datetime_obj):
+    t = datetime(1970,1,1)
+    return (datetime_obj - t).total_seconds()
 
 if _isMacOS:
     from ctypes import c_void_p, cdll
@@ -158,11 +136,25 @@ class _Tk_Menu(Tk.Menu):
                 self._shortcuts_widget.bind(key, kwds["command"])
 
 
+class Video(object):
+
+    def __init__(self, path):
+        self.path = path
+        self.name = os.path.basename(path)
+        self.modification_date = datetime.utcfromtimestamp(os.path.getmtime(path))
+
+    def __lt__(self, other):
+        return self.modification_date < other.modification_date
+
 class Player(Tk.Frame):
     """The main window has to deal with events.
     """
     _geometry = ''
     _stopped  = None
+
+    COLOR_FRAMES1 = '#ececec'
+    COLOR_FRAMES2 = '#999'
+    COLOR_FRAMES3 = '#ccc'
 
     def __init__(self, parent, title=None, video=''):
         Tk.Frame.__init__(self, parent)
@@ -187,9 +179,6 @@ class Player(Tk.Frame):
         fileMenu.add_shortcut("Mute", 'm', self.OnMute)
         fileMenu.add_separator()
         fileMenu.add_shortcut("Close", 'w' if _isMacOS else 's', self.OnClose)
-        # if _isMacOS:  # intended for and tested on macOS
-        #     fileMenu.add_separator()
-        #     fileMenu.add_shortcut("Full Screen", 'f', self.OnFullScreen)
         menubar.add_cascade(label="File", menu=fileMenu)
         self.fileMenu = fileMenu
         self.playIndex = fileMenu.index("Play")
@@ -203,25 +192,73 @@ class Player(Tk.Frame):
         self.videopanel.pack(fill=Tk.BOTH, expand=1)
 
         # panel to hold buttons
-        self.buttons_panel = Tk.Toplevel(self.parent)
-        # self.buttons_panel2 = Tk.Toplevel(self.parent)
+        self.buttons_panel = Tk.Toplevel(self.parent, bg=self.COLOR_FRAMES2)
         self.buttons_panel.title("")
-        # self.is_buttons_panel_anchor_active = False
 
         # create all of the main containers
-        self.frame_header1 = Tk.Frame(self.buttons_panel, padx=15, pady=5, bg='#f88')
-        self.frame_header2 = Tk.Frame(self.buttons_panel, padx=15, pady=5, bg='#8f8')
-        self.frame_center = Tk.Frame(self.buttons_panel)
-        self.frame_bottom = Tk.Frame(self.buttons_panel, padx=15, pady=15, bg='#88f')
+        self.frame_header = Tk.Frame(self.buttons_panel, padx=15, pady=5, bg=self.COLOR_FRAMES1)
+        self.frame_list = Tk.Frame(self.buttons_panel, padx=15, pady=5, bg=self.COLOR_FRAMES2)
+        self.frame_bottom = Tk.Frame(self.buttons_panel, padx=15, pady=15, bg=self.COLOR_FRAMES1)
 
-        # # layout all of the main containers
-        # self.buttons_panel.grid_rowconfigure(2, weight=1)
-        # self.buttons_panel.grid_columnconfigure(0, weight=1)
+        # layout all of the main containers
+        self.buttons_panel.grid_rowconfigure(2, weight=1)
+        self.buttons_panel.grid_columnconfigure(0, weight=1)
 
+        self.frame_header.grid(row=0, sticky="ew")
+        self.frame_list.grid(row=1, sticky="nsew")
+        self.frame_bottom.grid(row=2, sticky="ews")
+
+        # frames frame_center
+        self.frame_header.grid_columnconfigure(0, weight=1)
+        self.frame_header.grid_rowconfigure(3, weight=1)
+
+        self.frame_header1 = Tk.Frame(self.frame_header, bg=self.COLOR_FRAMES1, padx=15, pady=5)
         self.frame_header1.grid(row=0, sticky="ew")
-        self.frame_header2.grid(row=1, sticky="ew")
+        self.label_title = Tk.Label(self.frame_header1, text='VIDEO SCREENSHOTER', font="-weight bold", bg=self.COLOR_FRAMES1)
+        self.label_title.grid(row=0, sticky="ew")
 
-        buttons = ttk.Frame(self.frame_header1)
+
+        self.frame_header2 = Tk.Frame(self.frame_header, pady=15, bg=self.COLOR_FRAMES1)
+        self.frame_header2.grid(row=1, column=0)
+        self.frame_header2.grid_columnconfigure(0, weight=1)
+        self.folder_path_out = Tk.StringVar()
+        self.label_folder_out = Tk.Entry(self.frame_header2, state='disabled', width=40,
+                                     textvariable=self.folder_path_out, highlightbackground=self.COLOR_FRAMES1)
+        self.label_folder_out.grid(row=0, column=0)
+        self.btn_browse_folder_out = Tk.Button(self.frame_header2, text="Output folder", command=self.action_browse_out, highlightbackground=self.COLOR_FRAMES1)
+        self.btn_browse_folder_out.grid(row=0, column=1, padx=(5, 50))
+
+        self.frame_header3 = Tk.Frame(self.frame_header, pady=15, bg=self.COLOR_FRAMES1)
+        self.frame_header3.grid(row=2, column=0)
+        self.frame_header3.grid_columnconfigure(0, weight=1)
+        self.folder_path = Tk.StringVar()
+        self.label_folder = Tk.Entry(self.frame_header3, state='disabled', width=40,
+                                     textvariable=self.folder_path, highlightbackground=self.COLOR_FRAMES1)
+        self.label_folder.grid(row=0, column=0)
+        self.btn_browse_folder = Tk.Button(self.frame_header3, text="Choose folder", command=self.action_browse, highlightbackground=self.COLOR_FRAMES1)
+        self.btn_browse_folder.grid(row=0, column=1, padx=(5, 50))
+
+
+        # frames frame_bottom
+        self.frame_bottom.grid_columnconfigure(0, weight=1)
+        self.frame_bottom.grid_rowconfigure(2, weight=1)
+
+        self.frame_bottom_info = Tk.Frame(self.frame_bottom, bg=self.COLOR_FRAMES1, padx=15, pady=5)
+        self.frame_bottom_info.grid(row=0, sticky="ew")
+        self.str_filename = Tk.StringVar()
+        self.label_title = Tk.Label(self.frame_bottom_info, anchor="w", textvariable=self.str_filename, font="-weight bold", bg=self.COLOR_FRAMES1)
+        self.label_title.grid(row=0, sticky="ew")
+        self.str_modification_date = Tk.StringVar()
+        self.label_title = Tk.Label(self.frame_bottom_info, anchor="w", textvariable=self.str_modification_date, bg=self.COLOR_FRAMES1)
+        self.label_title.grid(row=1, sticky="ew")
+
+
+        self.frame_bottom1 = Tk.Frame(self.frame_bottom, bg=self.COLOR_FRAMES1, padx=15, pady=5)
+        self.frame_bottom1.grid(row=1, sticky="ew")
+        self.frame_bottom2 = Tk.Frame(self.frame_bottom, bg=self.COLOR_FRAMES1, padx=15, pady=5)
+        self.frame_bottom2.grid(row=2, sticky="ew")
+
+        buttons = ttk.Frame(self.frame_bottom1)
         self.playButton = ttk.Button(buttons, text="Play", command=self.OnPlay)
         stop            = ttk.Button(buttons, text="Stop", command=self.OnStop)
         self.muteButton = ttk.Button(buttons, text="Mute", command=self.OnMute)
@@ -233,24 +270,44 @@ class Player(Tk.Frame):
         self.volVar = Tk.IntVar()
         self.volSlider = Tk.Scale(buttons, variable=self.volVar, command=self.OnVolume,
                                   from_=0, to=100, orient=Tk.HORIZONTAL, length=200,
-                                  showvalue=0, label='Volume')
+                                  showvalue=0, label='Volume', bg=self.COLOR_FRAMES1)
         self.volSlider.pack(side=Tk.RIGHT)
-        # buttons.pack(side=Tk.TOP, fill=Tk.X)
-        buttons.grid(row=0, column=0)
-
+        buttons.grid(row=0, sticky="ew")
 
         # panel to hold player time slider
-        timers = ttk.Frame(self.frame_header2)
+        timers = ttk.Frame(self.frame_bottom2)
         self.timeVar = Tk.DoubleVar()
         self.timeSliderLast = 0
         self.timeSlider = Tk.Scale(timers, variable=self.timeVar, command=self.OnTime,
                                    from_=0, to=1000, orient=Tk.HORIZONTAL, length=100,
-                                   resolution=0.02, showvalue=0)  # label='Time',
+                                   resolution=0.02, showvalue=0, bg=self.COLOR_FRAMES1)
         self.timeSlider.pack(side=Tk.BOTTOM, fill=Tk.X, expand=1)
         self.timeSliderUpdate = time.time()
-        timers.grid(row=0, column=0)
+        timers.grid(row=0, sticky="ew")
         timers.pack(side=Tk.TOP, fill=Tk.X)
 
+
+        self.frame_bottom3 = Tk.Frame(self.frame_bottom, bg=self.COLOR_FRAMES1, padx=15, pady=5)
+        self.frame_bottom3.grid(row=3, sticky="ew")
+        self.btn_capture = Tk.Button(self.frame_bottom3, text="Capture (C)", command=self.capture,
+                                     highlightbackground='#bbf', height=4, width=60)
+        self.btn_capture.grid(row=0, column=0)
+
+        # widgets frame_list
+        self.frame_list.grid_rowconfigure(1, weight=2)
+        self.frame_list.grid_columnconfigure(0, weight=1)
+        self.label_list = Tk.Label(self.frame_list, text="Videos", bg=self.COLOR_FRAMES2)
+        self.label_list.grid(row=0, sticky="ew")
+        self.lb_ids = []
+        self.lb = Tk.Listbox(self.frame_list, font=("Courier", 12), height=28)
+        self.lb.bind('<<ListboxSelect>>', self.onselect)
+        self.lb.unbind('<space>')
+        self.lb.bind('<space>', self._Pause_Play)
+        self.lb.bind('a', self._Pause_Play)
+        self.lb.bind('c', self.capture)
+        self.lb.bind("<Left>", self.move_time_slider)
+        self.lb.bind("<Right>", self.move_time_slider)
+        self.lb.grid(row=1, sticky="ew")
 
         # VLC player
         args = []
@@ -286,14 +343,108 @@ class Player(Tk.Frame):
         else:
             self.is_buttons_panel_anchor_active = False
 
-        # self._AnchorButtonsPanel()
-
         self.OnTick()  # set the timer up
+
+    def move_time_slider(self, evt):
+        if evt.keysym == 'Right':
+            self.timeVar.set(self.timeVar.get() + 0.05)
+            self.timeSlider.set(self.timeSlider.get() + 0.05)
+        else:
+            self.timeVar.set(self.timeVar.get() - 0.05)
+            self.timeSlider.set(self.timeSlider.get() - 0.05)
+        self.OnTime()
+
+
+    def capture(self, evt=None):
+        out_dir_path = self.folder_path_out.get()
+        if (not out_dir_path):
+            Tk.messagebox.showinfo("Error", "First you need to set the output directory")
+        count = 0
+        video = self.results[self.lb.curselection()[0]]
+        folder_path = self.folder_path_out.get()
+        v_name = video.name.split('.')[0]
+        path_out = os.path.join(folder_path, v_name + f'{count:02d}' + '.png')
+        while os.path.isfile(path_out):
+            count += 1
+            path_out = os.path.join(folder_path, v_name + f'{count:02d}' + '.png')
+        self.player.video_take_snapshot(0, path_out, 0, 0)
+
+        # Check if need to rotate
+        ff_probe = ffmpeg.probe(video.path)
+        if ff_probe and 'streams' in ff_probe and 'side_data_list' in ff_probe['streams'][0] \
+                and 'rotation' in ff_probe['streams'][0]['side_data_list'][0]:
+
+            img = Image.open(path_out)
+            rotated_image = img.rotate(int(ff_probe['streams'][0]['side_data_list'][0]['rotation']), expand=True)
+            rotated_image.save(path_out)
+
+        # Update modification date (same as original video)
+        t_seconds = datetime_to_seconds(video.modification_date)
+        os.utime(path_out, (t_seconds, t_seconds))
+
+    def onselect(self, evt):
+        w = evt.widget
+        index = int(w.curselection()[0])
+        video = self.results[self.lb_ids[index]]
+        self.str_filename.set(video.name)
+        self.str_modification_date.set(video.modification_date.strftime("%d/%m/%Y, %H:%M:%S"))
+        self._Play(video.path)
+
+    # def update(self, outqueue):
+    #     try:
+    #         msg = outqueue.get_nowait()
+    #         if isinstance(msg, list):
+
+
+    #     except queue.Empty:
+    #         self.buttons_panel.after(100, self.update, outqueue)
+
+
+    def action_browse(self):
+        folder_path = Tk.filedialog.askdirectory()
+        self.folder_path.set(folder_path)
+        self.btn_browse_folder.config(state='disabled')
+        self.btn_capture.config(state='disabled')
+        self.lb.delete(0,'end')
+
+        def is_video(filename):
+            f = filename.lower()
+            return f.split('.')[-1] in ['mp4', 'mpeg', 'avi', 'mov', 'flv']
+
+        results = []
+        for path in os.listdir(folder_path):
+            if is_video(path):
+                results.append(Video(os.path.join(folder_path, path)))
+        self.results = sorted(results)
+
+        for i, r in enumerate(self.results):
+            self.lb_ids.append(i)
+            self.lb.insert(Tk.END, r.name)
+        self.btn_browse_folder.config(state='normal')
+        self.btn_capture.config(state='normal')
+
+        if self.results:
+            self.lb.select_set(0)
+            self.lb.event_generate('<<ListboxSelect>>')
+            # self.lb.focus_set(0)
+            # self.lb.selection_set( first = 0 )
+        else:
+            Tk.messagebox.showinfo("Video capturer", "No videos found!")
+
+        # self.outqueue = queue.Queue()
+        # thr = threading.Thread(target=self.process_folder,
+        #                        args=(self.folder_path.get(),
+        #                              self.outqueue))
+        # thr.start()
+        # self.buttons_panel.after(250, self.update, self.outqueue)
+
+    def action_browse_out(self):
+        filename = Tk.filedialog.askdirectory()
+        self.folder_path_out.set(filename)
 
     def OnClose(self, *unused):
         """Closes the window and quit.
         """
-        # print("_quit: bye")
         self.parent.quit()  # stops mainloop
         self.parent.destroy()  # this is necessary on Windows to avoid
         # ... Fatal Python Error: PyEval_RestoreThread: NULL tstate
@@ -307,14 +458,6 @@ class Player(Tk.Frame):
             self.buttons_panel.unbind("<Button-1>")
             self.buttons_panel.unbind("<B1-Motion>")
             self.buttons_panel.unbind("<ButtonRelease-1>")
-
-    # def _AnchorButtonsPanel(self):
-    #     video_height = self.parent.winfo_height()
-    #     panel_x = self.parent.winfo_x()
-    #     panel_y = self.parent.winfo_y() + video_height + 23 # 23 seems to put the panel just below our video.
-    #     panel_height = self.buttons_panel.winfo_height()
-    #     panel_width = self.parent.winfo_width()
-    #     self.buttons_panel.geometry("%sx%s+%s+%s" % (panel_width, panel_height, panel_x, panel_y))
 
     def OnConfigure(self, *unused):
         """Some widget configuration changed.
@@ -366,9 +509,15 @@ class Player(Tk.Frame):
                                              ("mov files", "*.mov")))
         self._Play(video)
 
-    def _Pause_Play(self, playing):
+    def _Pause_Play(self, playing=None):
+        if playing not in [True, False]:
+            playing = self.player.is_playing()
+            if playing:
+                self.player.pause()
+            else:
+                self.player.play()
         # re-label menu item and button, adjust callbacks
-        p = 'Pause' if playing else 'Play'
+        p = 'Pause (A)' if playing else 'Play (A)'
         c = self.OnPlay if playing is None else self.OnPause
         self.fileMenu.entryconfig(self.playIndex, label=p, command=c)
         # self.fileMenu.bind_shortcut('p', c)  # XXX handled
@@ -409,18 +558,7 @@ class Player(Tk.Frame):
             self.player.pause()  # toggles
 
     def OnPlay(self, *unused):
-        """Play video, if none is loaded, open the dialog window.
-        """
-        # if there's no video to play or playing,
-        # open a Tk.FileDialog to select a file
-        if not self.player.get_media():
-            if self.video:
-                self._Play(expanduser(self.video))
-                self.video = ''
-            else:
-                self.OnOpen()
-        # Try to play, if this fails display an error message
-        elif self.player.play():  # == -1
+        if self.player.play():  # == -1
             self.showError("Unable to play the video.")
         else:
             self._Pause_Play(True)
@@ -487,7 +625,7 @@ class Player(Tk.Frame):
                     self.timeSlider.set(t)
                     self.timeSliderLast = int(self.timeVar.get())
         # start the 1 second timer again
-        self.parent.after(50, self.OnTick)
+        self.parent.after(500, self.OnTick)
 
     def OnTime(self, *unused):
         if self.player:
