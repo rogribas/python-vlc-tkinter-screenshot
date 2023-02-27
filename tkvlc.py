@@ -4,6 +4,7 @@ import sys
 
 import ffmpeg
 from PIL import Image
+from PIL import ImageCms
 
 import tkinter as Tk
 from tkinter import ttk
@@ -371,11 +372,22 @@ class Player(Tk.Frame):
 
         # Check if need to rotate
         ff_probe = ffmpeg.probe(video.path)
-        if ff_probe and 'streams' in ff_probe and 'side_data_list' in ff_probe['streams'][0] \
-                and 'rotation' in ff_probe['streams'][0]['side_data_list'][0]:
+        rotation = 0
+        if ff_probe and 'streams' in ff_probe and 'side_data_list' in ff_probe['streams'][0]:
+            if 'rotation' in ff_probe['streams'][0]['side_data_list'][0]:
+                rotation = ff_probe['streams'][0]['side_data_list'][0]['rotation']
+            elif 'rotation' in ff_probe['streams'][0]['side_data_list'][1]:
+                rotation = ff_probe['streams'][0]['side_data_list'][1]['rotation']
 
-            img = Image.open(path_out)
-            rotated_image = img.rotate(int(ff_probe['streams'][0]['side_data_list'][0]['rotation']), expand=True)
+        img = Image.open(path_out)
+        rotated_image = img.rotate(int(rotation), expand=True)
+        if ff_probe and 'streams' in ff_probe \
+                and ff_probe['streams'][0].get('codec_name', None) == 'hevc':
+            profile = ImageCms.getOpenProfile(os.path.join(
+                                os.path.dirname(os.path.realpath(__file__)),
+                                "DisplayP3Compat-v4.icc"))
+            rotated_image.save(path_out, icc_profile=profile.tobytes())
+        else:
             rotated_image.save(path_out)
 
         # Update modification date (same as original video)
