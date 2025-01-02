@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon, QKeyEvent
 import datetime
+import time
 
 import ffmpeg
 from PIL import Image
@@ -32,6 +33,9 @@ class VideoPlayer(QWidget):
         self.instance = vlc.Instance()
         self.player = self.instance.media_player_new()
 
+        # Default volume level
+        self.default_volume = 0  # Set volume to 50% initially
+
         # To keep track of the folder and list of videos
         self.video_files = []
         self.current_video_path = ""
@@ -46,7 +50,7 @@ class VideoPlayer(QWidget):
 
     def init_ui(self):
         self.setWindowTitle('Video Player')
-        
+
         # Maximize the window on startup
         self.showMaximized()
 
@@ -97,7 +101,7 @@ class VideoPlayer(QWidget):
         self.video_widget.setStyleSheet("background-color: black;")
         right_layout.addWidget(self.video_widget)
 
-        # Controls: Play, Pause, Stop, Capture, and Progress bar
+        # Controls: Play, Pause, Stop, Capture, Progress bar, and Volume slider
         controls_layout = QHBoxLayout()
 
         self.play_button = QPushButton("Play", self)
@@ -122,18 +126,33 @@ class VideoPlayer(QWidget):
         self.progress_bar.sliderMoved.connect(self.seek_video)
         controls_layout.addWidget(self.progress_bar)
 
+        # Volume slider
+        self.volume_slider = QSlider(Qt.Horizontal, self)
+        self.volume_slider.setRange(0, 100)  # VLC volume range is 0 to 100
+        self.volume_slider.setValue(self.default_volume)
+        self.volume_slider.valueChanged.connect(self.change_volume)
+        controls_layout.addWidget(QLabel("Volume"))
+        controls_layout.addWidget(self.volume_slider)
+
         right_layout.addLayout(controls_layout)
         self.right_panel.setLayout(right_layout)
 
         # Add panels to the splitter
         splitter.addWidget(self.left_panel)
         splitter.addWidget(self.right_panel)
-        splitter.setSizes([self.width() // 4, self.width()*3 // 4])
+        splitter.setSizes([self.width() // 4, self.width() * 3 // 4])
 
         # Set main layout
         layout = QVBoxLayout(self)
         layout.addWidget(splitter)
         self.setLayout(layout)
+
+        # Set the initial volume
+        self.change_volume(self.default_volume)
+
+    def change_volume(self, value):
+        """Set the VLC player's volume to the slider's value."""
+        self.player.audio_set_volume(value)
 
     def open_video_folder(self):
         folder_path = QFileDialog.getExistingDirectory(self, 'Select Video Folder')
@@ -149,17 +168,26 @@ class VideoPlayer(QWidget):
 
     def load_videos_from_folder(self, folder_path):
         supported_formats = ['.mp4', '.avi', '.mov', '.mkv']
-        self.video_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path)
+        
+        # Get all video files and their modification times
+        self.video_files = [(os.path.join(folder_path, f), os.path.getmtime(os.path.join(folder_path, f))) 
+                            for f in os.listdir(folder_path) 
                             if os.path.splitext(f)[1].lower() in supported_formats]
+        
+        # Sort video files by modification time (oldest to newest)
+        self.video_files.sort(key=lambda x: x[1])
+
+        # Clear the list and add sorted videos
         self.video_list.clear()
-        for video in self.video_files:
+        for video, _ in self.video_files:
             self.video_list.addItem(os.path.basename(video))
+        
         if self.video_files:
             self.video_list.setCurrentRow(0)
 
     def play_video_by_index(self, index):
         if 0 <= index < len(self.video_files):
-            self.current_video_path = self.video_files[index]
+            self.current_video_path = self.video_files[index][0]  # Get the path from the sorted tuple
             media = self.instance.media_new(self.current_video_path)
             self.player.set_media(media)
             if sys.platform == "win32":
@@ -173,6 +201,7 @@ class VideoPlayer(QWidget):
     def play_video(self):
         if self.player.get_state() != vlc.State.Playing:
             self.player.play()
+            self.player.audio_set_volume(self.volume_slider.value())  # Ensure volume is maintained
             self.timer.start(100)
 
     def pause_video(self):
@@ -221,32 +250,41 @@ class VideoPlayer(QWidget):
 
     def capture_screenshot(self):
         if self.current_video_path:
-            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-            screenshot_filename = os.path.join(self.screenshot_output_folder, f"screenshot_{timestamp}.png")
+            # Get the timestamp of the current video file (last modified time)
+            video_modified_time = os.path.getmtime(self.current_video_path)
+            modified_timestamp = datetime.datetime.fromtimestamp(video_modified_time).strftime('%Y%m%d_%H%M%S')
+            
+            # Save screenshot with the same timestamp format
+            screenshot_filename = os.path.join(self.screenshot_output_folder, f"screenshot_{modified_timestamp}.png")
+            
+            # Capture the screenshot
             self.player.video_take_snapshot(0, screenshot_filename, 0, 0)
-        
-        # Capture the screenshot and save it
-        self.player.video_take_snapshot(0, screenshot_filename, 0, 0)
 
-        # Check if need to rotate
-        ff_probe = ffmpeg.probe(self.current_video_path)
-        rotation = 0
-        if ff_probe and 'streams' in ff_probe and 'side_data_list' in ff_probe['streams'][0]:
-            if 'rotation' in ff_probe['streams'][0]['side_data_list'][0]:
-                rotation = ff_probe['streams'][0]['side_data_list'][0]['rotation']
-            elif 'rotation' in ff_probe['streams'][0]['side_data_list'][1]:
-                rotation = ff_probe['streams'][0]['side_data_list'][1]['rotation']
+            # Check if need to rotate
+            ff_probe = ffmpeg.probe(self.current_video_path)
+            rotation = 0
+            if ff_probe and 'streams' in ff_probe and 'side_data_list' in ff_probe['streams'][0]:
+                if 'rotation' in ff_probe['streams'][0]['side_data_list'][0]:
+                    rotation = ff_probe['streams'][0]['side_data_list'][0]['rotation']
+                elif 'rotation' in ff_probe['streams'][0]['side_data_list'][1]:
+                    rotation = ff_probe['streams'][0]['side_data_list'][1]['rotation']
 
-        img = Image.open(screenshot_filename)
-        rotated_image = img.rotate(int(rotation), expand=True)
-        if ff_probe and 'streams' in ff_probe \
-                and ff_probe['streams'][0].get('codec_name', None) == 'hevc':
-            profile = ImageCms.getOpenProfile(os.path.join(
-                                os.path.dirname(os.path.realpath(__file__)),
-                                "DisplayP3Compat-v4.icc"))
-            rotated_image.save(screenshot_filename, icc_profile=profile.tobytes())
-        else:
-            rotated_image.save(screenshot_filename)
+            # Open the screenshot and rotate if necessary
+            img = Image.open(screenshot_filename)
+            rotated_image = img.rotate(int(rotation), expand=True)
+            
+            # Save the rotated image, and handle specific profiles if required
+            if ff_probe and 'streams' in ff_probe \
+                    and ff_probe['streams'][0].get('codec_name', None) == 'hevc':
+                profile = ImageCms.getOpenProfile(os.path.join(
+                                    os.path.dirname(os.path.realpath(__file__)),
+                                    "DisplayP3Compat-v4.icc"))
+                rotated_image.save(screenshot_filename, icc_profile=profile.tobytes())
+            else:
+                rotated_image.save(screenshot_filename)
+
+            # Set the modified time of the screenshot to match the video's modified time
+            os.utime(screenshot_filename, (video_modified_time, video_modified_time))
 
 
 def main():
